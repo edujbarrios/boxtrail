@@ -91,6 +91,65 @@ def _bounded(box: Box, bounds: Box, *, clip: bool, label: str) -> Box:
     return (x1, y1, x2, y2)
 
 
+_FORMATS = frozenset({"xyxy", "xywh", "cxcywh"})
+
+
+def _validate_format(box_format: str, name: str) -> None:
+    if not isinstance(box_format, str) or box_format not in _FORMATS:
+        raise ValueError(f"{name} must be 'xyxy', 'xywh', or 'cxcywh'")
+
+
+def _validate_normalized(value: bool, name: str) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+
+
+def _decode_box(
+    box: Sequence[Real], *, box_format: str, normalized: bool, size: Size
+) -> Box:
+    """Convert a supported box into absolute xyxy pixel-edge coordinates."""
+    _validate_format(box_format, "input_format")
+    _validate_normalized(normalized, "input_normalized")
+    parts = _items(box, 4, "box")
+    if any(isinstance(v, bool) or not isinstance(v, Real) for v in parts):
+        raise ValueError("box coordinates must be finite real numbers")
+    values = tuple(float(v) for v in parts)
+    if not all(isfinite(v) for v in values):
+        raise ValueError("box coordinates must be finite real numbers")
+    a, b, c, d = values
+    if normalized:
+        width, height = size
+        a, b, c, d = a * width, b * height, c * width, d * height
+    if box_format == "xyxy":
+        xyxy = (a, b, c, d)
+    elif box_format == "xywh":
+        xyxy = (a, b, a + c, b + d)
+    else:
+        xyxy = (a - c / 2, b - d / 2, a + c / 2, b + d / 2)
+    return _box(xyxy)
+
+
+def _encode_box(
+    box: Box, *, box_format: str, normalized: bool, size: Size
+) -> Box:
+    """Convert an absolute xyxy box into a requested output format."""
+    _validate_format(box_format, "output_format")
+    _validate_normalized(normalized, "output_normalized")
+    x1, y1, x2, y2 = box
+    if box_format == "xyxy":
+        result = (x1, y1, x2, y2)
+    elif box_format == "xywh":
+        result = (x1, y1, x2 - x1, y2 - y1)
+    else:
+        result = ((x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1)
+    if normalized:
+        width, height = size
+        result = (result[0] / width, result[1] / height,
+                  result[2] / width, result[3] / height)
+    return result
+
+
+
 @dataclass(frozen=True, slots=True)
 class LetterboxTransform:
     """Geometry of a resize-and-pad operation.
@@ -133,70 +192,149 @@ class LetterboxTransform:
         left, top, _, _ = self.padding
         return (float(left), float(top), float(left + self.resized_size[0]), float(top + self.resized_size[1]))
 
-    def to_target(self, box: Sequence[Real], *, clip: bool = False) -> Box:
-        """Map a source xyxy box to the letterboxed target coordinate system.
+    def to_target(
+        self,
+        box: Sequence[Real],
+        *,
+        clip: bool = False,
+        input_format: str = "xyxy",
+        output_format: str = "xyxy",
+        input_normalized: bool = False,
+        output_normalized: bool = False,
+    ) -> Box:
+        """Map a box from the source image to the letterboxed target canvas.
 
-        By default, an out-of-bounds box raises ValueError. Set ``clip=True``
-        to intersect it with the source image before the conversion.
+        Input and output formats may be 'xyxy' (corner edges), 'xywh'
+        (top-left, width, height) or 'cxcywh' (center, width, height).
+        Normalized values are relative to their OWN coordinate space:
+        source dimensions on input, complete target canvas on output.
+        By default invalid out-of-bounds boxes raise ValueError; clip=True
+        intersects the input with the valid source image.
         """
         source_width, source_height = self.source_size
+        pixel_box = _decode_box(
+            box, box_format=input_format, normalized=input_normalized,
+            size=self.source_size,
+        )
         x1, y1, x2, y2 = _bounded(
-            _box(box), (0.0, 0.0, float(source_width), float(source_height)),
+            pixel_box, (0.0, 0.0, float(source_width), float(source_height)),
             clip=clip, label="source image",
         )
         sx, sy = self.scale
         left, top, _, _ = self.padding
-        return (x1 * sx + left, y1 * sy + top, x2 * sx + left, y2 * sy + top)
+        mapped = (x1 * sx + left, y1 * sy + top,
+                  x2 * sx + left, y2 * sy + top)
+        return _encode_box(
+            mapped, box_format=output_format, normalized=output_normalized,
+            size=self.target_size,
+        )
 
-    def to_source(self, box: Sequence[Real], *, clip: bool = False) -> Box:
-        """Map a target xyxy box back to the original source image.
+    def to_source(
+        self,
+        box: Sequence[Real],
+        *,
+        clip: bool = False,
+        input_format: str = "xyxy",
+        output_format: str = "xyxy",
+        input_normalized: bool = False,
+        output_normalized: bool = False,
+    ) -> Box:
+        """Map a box from the target canvas back to the original source.
 
-        The valid target region excludes padding. For a detection overlapping
-        padding, ``clip=True`` clips it to image content before conversion.
-        A box entirely inside padding has no source box and raises ValueError.
+        Normalized inputs use FULL target canvas dimensions, including
+        padding; normalized outputs use original source dimensions.
+        Boxes that overlap padding raise unless clip=True. A box fully in
+        padding cannot be mapped and always raises ValueError.
         """
+        pixel_box = _decode_box(
+            box, box_format=input_format, normalized=input_normalized,
+            size=self.target_size,
+        )
         x1, y1, x2, y2 = _bounded(
-            _box(box), self.content_box, clip=clip, label="target image content",
+            pixel_box, self.content_box, clip=clip,
+            label="target image content",
         )
         sx, sy = self.scale
         left, top, _, _ = self.padding
         source_width, source_height = self.source_size
-        # Clamp only tiny floating-point noise at the boundaries.
-        return (
+        mapped = (
             min(float(source_width), max(0.0, (x1 - left) / sx)),
             min(float(source_height), max(0.0, (y1 - top) / sy)),
             min(float(source_width), max(0.0, (x2 - left) / sx)),
             min(float(source_height), max(0.0, (y2 - top) / sy)),
         )
+        return _encode_box(
+            mapped, box_format=output_format, normalized=output_normalized,
+            size=self.source_size,
+        )
 
     def to_target_many(
-        self, boxes: Iterable[Sequence[Real]], *, clip: bool = False
+        self,
+        boxes: Iterable[Sequence[Real]],
+        *,
+        clip: bool = False,
+        input_format: str = "xyxy",
+        output_format: str = "xyxy",
+        input_normalized: bool = False,
+        output_normalized: bool = False,
     ) -> list[Box]:
-        """Map multiple source-space boxes, preserving input order.
-
-        Raises ValueError with the index of the first invalid input. Accepts
-        plain iterables and optional NumPy arrays shaped (N, 4).
-        """
-        return self._map_many(boxes, source=False, clip=clip)
+        """Map multiple source-space boxes and preserve input order."""
+        return self._map_many(
+            boxes, source=False, clip=clip,
+            input_format=input_format, output_format=output_format,
+            input_normalized=input_normalized,
+            output_normalized=output_normalized,
+        )
 
     def to_source_many(
-        self, boxes: Iterable[Sequence[Real]], *, clip: bool = False
+        self,
+        boxes: Iterable[Sequence[Real]],
+        *,
+        clip: bool = False,
+        input_format: str = "xyxy",
+        output_format: str = "xyxy",
+        input_normalized: bool = False,
+        output_normalized: bool = False,
     ) -> list[Box]:
-        """Map multiple target-space boxes, preserving input order."""
-        return self._map_many(boxes, source=True, clip=clip)
+        """Map multiple target-space boxes and preserve input order."""
+        return self._map_many(
+            boxes, source=True, clip=clip,
+            input_format=input_format, output_format=output_format,
+            input_normalized=input_normalized,
+            output_normalized=output_normalized,
+        )
 
     def _map_many(
-        self, boxes: Iterable[Sequence[Real]], *, source: bool, clip: bool
+        self,
+        boxes: Iterable[Sequence[Real]],
+        *,
+        source: bool,
+        clip: bool,
+        input_format: str,
+        output_format: str,
+        input_normalized: bool,
+        output_normalized: bool,
     ) -> list[Box]:
+        _validate_format(input_format, "input_format")
+        _validate_format(output_format, "output_format")
+        _validate_normalized(input_normalized, "input_normalized")
+        _validate_normalized(output_normalized, "output_normalized")
         try:
             iterator = iter(boxes)
         except TypeError as exc:
-            raise ValueError("boxes must be an iterable of xyxy boxes") from exc
+            raise ValueError("boxes must be an iterable of boxes") from exc
         convert = self.to_source if source else self.to_target
         converted: list[Box] = []
         for idx, box in enumerate(iterator):
             try:
-                converted.append(convert(box, clip=clip))
+                converted.append(
+                    convert(
+                        box, clip=clip,
+                        input_format=input_format, output_format=output_format,
+                        input_normalized=input_normalized,
+                        output_normalized=output_normalized,
+                    )
+                )
             except ValueError as exc:
                 raise ValueError(f"box at index {idx}: {exc}") from exc
         return converted
