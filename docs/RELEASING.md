@@ -1,48 +1,39 @@
-# Publishing BoxTrail to PyPI
+# Releasing BoxTrail
 
-BoxTrail uses GitHub Actions Trusted Publishing (OIDC) and the official
-`pypa/gh-action-pypi-publish@release/v1` action. No PyPI API key or password
-is stored in GitHub.
+BoxTrail publishes to PyPI through GitHub Actions with **Trusted Publishing (OIDC)**.
+No PyPI API token is stored in the repository.
 
-The publication workflow is **.github/workflows/release.yml**.
+## Trusted Publisher settings
 
-## Trusted Publisher configuration on PyPI
+- PyPI distribution: `boxtrail`
+- GitHub owner: `edujbarrios`
+- GitHub repository: `boxtrail`
+- Workflow: `.github/workflows/release.yml`
+- GitHub environment: `pypi`
 
-The PyPI publisher must identify:
-- Owner: `edujbarrios`
-- Repository: `boxtrail`
-- Workflow filename: `release.yml`
-- Environment: `pypi` (when configured, it must match both sides)
-- Package name: `boxtrail`
+The environment name must match the publisher registration at PyPI.
 
-The same `pypi` environment is used by the `publish` job in GitHub Actions.
-An environment may require deployment approval if configured accordingly.
+## Release procedure
 
-## Initial release (0.1.0)
+1. Update versions in `pyproject.toml` and `src/boxtrail/__init__.py`.
+2. Update `CHANGELOG.md` and README if needed.
+3. Run `python -m unittest discover -s tests -v` and check CI on pull requests.
+4. Publish a GitHub Release with a matching version tag, e.g. `v0.3.0`.
+5. The `release.published` workflow builds the wheel and sdist, runs tests and uploads distributions to PyPI.
+6. Verify the action is green and confirm the new version is available at https://pypi.org/project/boxtrail/.
 
-The initial workflow setup includes a **one-time gated push trigger**, restricted
-to the exact commit message `release: publish boxtrail 0.1.0`, to publish the
-first version when the workflow is installed. Subsequent ordinary pushes do
-not publish; follow-up releases use GitHub Releases (published event).
+For initial 0.2.0 publication, a narrowly gated push trigger is included for the
+exact commit message `release: publish boxtrail 0.2.0`. The publish action
+runs only after successful tests/build. On successful PyPI publication the
+workflow also creates GitHub tag and release `v0.2.0` if GitHub Actions has
+write permission to do so. This one-time push trigger is not a general
+auto-release-on-commit mechanism.
 
-Check the Actions tab and the PyPI package page to verify successful upload.
-If the Trusted Publisher configuration differs from the values above, the
-publish job will fail authentication and PyPI will not receive the version.
-
-## Future releases
-
-1. Update `pyproject.toml` and `src/boxtrail/__init__.py` versions together.
-2. Update CHANGELOG.md and run `python -m unittest discover -s tests -v`.
-3. Commit the code, create a matching Git tag and publish a GitHub Release.
-4. The `release.published` event triggers test/build/upload.
-5. Check the job result and https://pypi.org/project/boxtrail/.
-
-To build locally without uploading:
+To build and inspect artifacts without uploading:
 
 ```bash
 python -m pip install --upgrade build
 python -m build
 ```
 
-**Important:** uploading an existing version to PyPI a second time is not
-supported. Increase the version for each new publication.
+Each PyPI version is immutable: increment the version for subsequent uploads.
