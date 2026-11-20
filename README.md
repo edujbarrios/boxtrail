@@ -47,7 +47,7 @@ from boxtrail import letterbox
 t = letterbox((1920, 1080), (640, 640))
 
 # Center, width and height, normalized to 640 x 640.
-yolo_box = (0.25, 0.4375, 0.425, 0.225)
+yolo_box = (0.4125, 0.4375, 0.425, 0.225)
 
 # Convert into pixel-edge xyxy in the original 1920 x 1080 image:
 original = t.to_source(
@@ -56,7 +56,7 @@ original = t.to_source(
     input_normalized=True,
 )
 print(original)
-# (72.0, 216.0, 888.0, 648.0)
+# (384.0, 204.0, 1200.0, 636.0)
 ```
 
 These conversions are explicit: by default the output remains absolute `xyxy`. If you need a normalized output too, specify `output_format` and `output_normalized`.
