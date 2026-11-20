@@ -121,3 +121,15 @@ Copyright © 2026 **Eduardo J. Barrios** ([@edujbarrios](https://github.com/eduj
 BoxTrail is free and open-source software under the **GNU Affero General Public License, version 3 only (AGPL-3.0-only)**. Copies and covered modifications must preserve the required copyright and license notices; the AGPL also imposes source-availability requirements for certain network-based uses. Commercial use is allowed under the terms of the license. Read [LICENSE](LICENSE) and [NOTICE](NOTICE) before redistributing or integrating the software.
 
 Contributions: [CONTRIBUTING.md](CONTRIBUTING.md). Release process: [docs/RELEASING.md](docs/RELEASING.md).
+
+## Automated releases
+
+PyPI publication is automatic **when the package version changes on `main`**.
+Update `pyproject.toml` and `src/boxtrail/__init__.py` to the same new
+version, then merge. GitHub Actions verifies the version is not already on
+PyPI, tests Python 3.10–3.14, builds the wheel and source distribution,
+publishes using OIDC Trusted Publishing, and creates a matching GitHub
+Release. No manual tag or PyPI upload is required.
+
+See [the release guide](docs/RELEASING.md). Normal documentation-only
+commits do not trigger PyPI publication.

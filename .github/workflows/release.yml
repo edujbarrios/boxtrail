@@ -1,47 +1,148 @@
 name: Publish to PyPI
 
+# Publishing is automatic when the package version is bumped on main.
+# PyPI does not allow overwriting an already-published version.
 on:
-  # One-time, commit-message-gated publication of v0.2.0.
   push:
     branches: [main]
-    paths: [".github/workflows/release.yml"]
-  # Normal publication method for future versions.
-  release:
-    types: [published]
+    paths:
+      - "pyproject.toml"
+      - "src/boxtrail/__init__.py"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Prevent concurrent uploads for the same distribution.
+concurrency:
+  group: boxtrail-pypi-publish
+  cancel-in-progress: false
+
 jobs:
+  preflight:
+    name: Check version and PyPI availability
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      should_publish: ${{ steps.detect.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: detect
+        name: Validate package version and look up PyPI
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          import os
+          import re
+          import tomllib
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          package = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          if package["name"] != "boxtrail":
+              raise SystemExit("Unexpected distribution name")
+
+          version = package["version"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:a[0-9]+|b[0-9]+|rc[0-9]+)?", version):
+              raise SystemExit(f"Unsupported version format: {version!r}")
+
+          module = ast.parse(Path("src/boxtrail/__init__.py").read_text(encoding="utf-8"))
+          values = [
+              node.value.value
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+              and isinstance(node.value, ast.Constant)
+              and isinstance(node.value.value, str)
+          ]
+          if values != [version]:
+              raise SystemExit(f"Version mismatch: pyproject.toml={version}, __init__.py={values}")
+
+          url = f"https://pypi.org/pypi/boxtrail/{version}/json"
+          request = urllib.request.Request(url, headers={"User-Agent": "boxtrail-release-check/1.0"})
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  already_exists = response.status == 200
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  already_exists = False
+              else:
+                  raise
+
+          publish = not already_exists
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+              output.write(f"should_publish={str(publish).lower()}\n")
+
+          if already_exists:
+              print(f"BoxTrail {version} already exists on PyPI. Skipping publication.")
+          else:
+              print(f"BoxTrail {version} is not yet published; starting validation and release.")
+          PY
+
+  tests:
+    name: Python ${{ matrix.python }} (NumPy ${{ matrix.numpy }})
+    needs: preflight
+    if: needs.preflight.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            numpy: false
+          - python: "3.11"
+            numpy: true
+          - python: "3.12"
+            numpy: false
+          - python: "3.13"
+            numpy: false
+          - python: "3.14"
+            numpy: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Install optional NumPy
+        if: matrix.numpy
+        run: python -m pip install numpy
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
   build:
-    name: Test and build
-    if: >-
-      github.event_name == 'release' ||
-      (github.event_name == 'push' &&
-       github.event.head_commit.message == 'release: publish boxtrail 0.2.0')
+    name: Build and validate distributions
+    needs: [preflight, tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install package and build tool
-        run: |
-          python -m pip install --upgrade pip build
-          python -m pip install -e .
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-      - name: Build distributions
+      - name: Install build utilities
+        run: python -m pip install --upgrade build twine
+      - name: Build sdist and wheel
         run: python -m build
-      - uses: actions/upload-artifact@v4
+      - name: Validate package metadata
+        run: python -m twine check dist/*
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: python-distributions
           path: dist/
           if-no-files-found: error
 
   publish:
-    name: Publish to PyPI (trusted publisher)
-    needs: build
+    name: Publish with PyPI Trusted Publishing
+    needs: [preflight, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -51,19 +152,29 @@ jobs:
         with:
           name: python-distributions
           path: dist/
-      - name: Publish distribution
+      - name: Upload distributions
         uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
-    name: Create v0.2.0 GitHub Release
-    needs: publish
-    if: github.event_name == 'push'
+    name: Create matching GitHub Release
+    needs: [preflight, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Create annotated GitHub release with tag
+      - name: Create release after successful PyPI upload
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        shell: bash
         run: |
-          gh release create v0.2.0             --repo "${{ github.repository }}"             --target "${{ github.sha }}"             --title "BoxTrail 0.2.0"             --generate-notes
+          tag="v${VERSION}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists."
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "BoxTrail ${VERSION}" \
+              --generate-notes
+          fi
