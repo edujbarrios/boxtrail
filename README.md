@@ -2,24 +2,30 @@
 
 **Move bounding boxes between original and letterboxed image coordinates — without guessing the padding.**
 
+[![PyPI version](https://img.shields.io/pypi/v/boxtrail?label=PyPI&logo=pypi)](https://pypi.org/project/boxtrail/)
+[![Python versions](https://img.shields.io/pypi/pyversions/boxtrail?label=Python)](https://pypi.org/project/boxtrail/)
+[![PyPI downloads](https://static.pepy.tech/badge/boxtrail)](https://pepy.tech/project/boxtrail)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Runtime dependencies: 0](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 
 BoxTrail is a tiny, **pure-Python, zero-runtime-dependency** library for reconstructing bounding-box coordinates after a resize-and-pad (**letterbox**) operation. It exposes the actual integer resize geometry, the padding and the per-axis scales so results are inspectable and reproducible.
 
-> **Status: v0.1.0 — source ready; not published on PyPI.** No release or upload workflow is configured.
+> **Version: 0.1.0.** The release workflow uses PyPI Trusted Publishing (OIDC). The PyPI badges above show publication status directly from package-index services.
 
 ## Why it exists
 
 Computer-vision models often take square inputs. A 1920 × 1080 image may be resized to 640 × 360 and padded to 640 × 640. Predictions in the 640 × 640 canvas must be mapped back to the original image. Getting padding order, rounding, or width/height conventions wrong can shift boxes. BoxTrail handles this one task and deliberately does **not** resize images, run models, or provide annotation tooling.
 
-## Install from source (until a release is approved)
+## Installation
 
 ```bash
-git clone https://github.com/edujbarrios/boxtrail.git
-cd boxtrail
-python -m pip install -e .
+pip install boxtrail
+```
+
+To install directly from the source repository instead:
+
+```bash
+pip install git+https://github.com/edujbarrios/boxtrail.git
 ```
 
 ## Quick start
@@ -87,7 +93,7 @@ print(t.padding)   # (0, 0, 80, 90)
 python -m unittest discover -s tests -v
 ```
 
-There are no third-party runtime or test dependencies. To build distributables **locally**, see [docs/RELEASING.md](docs/RELEASING.md); publication is intentionally not configured.
+There are no third-party runtime or test dependencies. Release automation runs the tests, builds distributions, then publishes through the official PyPA action and GitHub OIDC Trusted Publishing; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License, copyleft and attribution
 
