@@ -11,28 +11,58 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
-from typing import Sequence
+from operator import index as integer_index
+from typing import Iterable, Sequence
 
 Box = tuple[float, float, float, float]
 Size = tuple[int, int]
 Padding = tuple[int, int, int, int]
 
 
+def _items(value: object, count: int, name: str) -> tuple:
+    """Read a fixed-length indexable input, including an optional NumPy array.
+
+    No NumPy import is required. A one-dimensional ndarray exposes len() and
+    integer indexing but is not a collections.abc.Sequence.
+    """
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"{name} must contain {count} values")
+    try:
+        if len(value) != count:
+            raise ValueError(f"{name} must contain {count} values")
+        return tuple(value[i] for i in range(count))
+    except (TypeError, IndexError, KeyError) as exc:
+        raise ValueError(f"{name} must contain {count} indexable values") from exc
+
+
+def _integer(value: object, name: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or type(value).__name__ == "bool_":
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    try:
+        result = integer_index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer >= {minimum}") from exc
+    if result < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return int(result)
+
+
 def _size(value: Sequence[int], name: str) -> Size:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != 2:
-        raise ValueError(f"{name} must be a (width, height) pair of positive integers")
-    width, height = value
-    if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (width, height)):
-        raise ValueError(f"{name} must be a (width, height) pair of positive integers")
-    return (width, height)
+    width, height = _items(value, 2, name)
+    return (_integer(width, f"{name} width", minimum=1),
+            _integer(height, f"{name} height", minimum=1))
+
+
+def _padding(value: Sequence[int]) -> Padding:
+    left, top, right, bottom = _items(value, 4, "padding")
+    return tuple(_integer(v, "padding coordinate") for v in (left, top, right, bottom))
 
 
 def _box(value: Sequence[Real]) -> Box:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != 4:
-        raise ValueError("box must contain four xyxy coordinates")
-    if any(isinstance(v, bool) or not isinstance(v, Real) for v in value):
+    parts = _items(value, 4, "box")
+    if any(isinstance(v, bool) or not isinstance(v, Real) for v in parts):
         raise ValueError("box coordinates must be finite real numbers")
-    coords = tuple(float(v) for v in value)
+    coords = tuple(float(v) for v in parts)
     if not all(isfinite(v) for v in coords):
         raise ValueError("box coordinates must be finite real numbers")
     x1, y1, x2, y2 = coords
@@ -78,10 +108,7 @@ class LetterboxTransform:
         source = _size(self.source_size, "source_size")
         target = _size(self.target_size, "target_size")
         resized = _size(self.resized_size, "resized_size")
-        p = self.padding
-        if (not isinstance(p, tuple) or len(p) != 4 or
-                any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in p)):
-            raise ValueError("padding must be four non-negative integers")
+        p = _padding(self.padding)
         if resized[0] + p[0] + p[2] != target[0] or resized[1] + p[1] + p[3] != target[1]:
             raise ValueError("resized_size and padding must exactly fill target_size")
         if resized[0] > target[0] or resized[1] > target[1]:
@@ -90,6 +117,7 @@ class LetterboxTransform:
         object.__setattr__(self, "source_size", source)
         object.__setattr__(self, "target_size", target)
         object.__setattr__(self, "resized_size", resized)
+        object.__setattr__(self, "padding", p)
 
     @property
     def scale(self) -> tuple[float, float]:
@@ -141,6 +169,38 @@ class LetterboxTransform:
             min(float(source_height), max(0.0, (y2 - top) / sy)),
         )
 
+    def to_target_many(
+        self, boxes: Iterable[Sequence[Real]], *, clip: bool = False
+    ) -> list[Box]:
+        """Map multiple source-space boxes, preserving input order.
+
+        Raises ValueError with the index of the first invalid input. Accepts
+        plain iterables and optional NumPy arrays shaped (N, 4).
+        """
+        return self._map_many(boxes, source=False, clip=clip)
+
+    def to_source_many(
+        self, boxes: Iterable[Sequence[Real]], *, clip: bool = False
+    ) -> list[Box]:
+        """Map multiple target-space boxes, preserving input order."""
+        return self._map_many(boxes, source=True, clip=clip)
+
+    def _map_many(
+        self, boxes: Iterable[Sequence[Real]], *, source: bool, clip: bool
+    ) -> list[Box]:
+        try:
+            iterator = iter(boxes)
+        except TypeError as exc:
+            raise ValueError("boxes must be an iterable of xyxy boxes") from exc
+        convert = self.to_source if source else self.to_target
+        converted: list[Box] = []
+        for idx, box in enumerate(iterator):
+            try:
+                converted.append(convert(box, clip=clip))
+            except ValueError as exc:
+                raise ValueError(f"box at index {idx}: {exc}") from exc
+        return converted
+
     def as_dict(self) -> dict[str, object]:
         """Return the inspectable transform as JSON-serializable geometry."""
         return {
@@ -187,3 +247,28 @@ def letterbox(
     top = extra_h // 2 if center else 0
     padding = (left, top, extra_w - left, extra_h - top)
     return LetterboxTransform((src_w, src_h), (tgt_w, tgt_h), (new_w, new_h), padding)
+
+
+def from_geometry(
+    *,
+    source: Sequence[int],
+    resized: Sequence[int],
+    padding: Sequence[int],
+) -> LetterboxTransform:
+    """Construct geometry from the *actual* preprocessing operation.
+
+    Args:
+        source: Original image (width, height).
+        resized: Integer image size after resizing, before padding.
+        padding: Measured (left, top, right, bottom) integer padding.
+
+    Unlike letterbox(), this does not guess the resize rounding or padding
+    policy. The target canvas is derived from resized size plus padding.
+    Images must already have been preprocessed by the caller.
+    """
+    src = _size(source, "source")
+    resized_dims = _size(resized, "resized")
+    pad = _padding(padding)
+    target = (resized_dims[0] + pad[0] + pad[2],
+              resized_dims[1] + pad[1] + pad[3])
+    return LetterboxTransform(src, target, resized_dims, pad)

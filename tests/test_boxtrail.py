@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Standard-library tests for BoxTrail geometry."""
 
+import importlib.util
 import json
 import math
 import unittest
 from dataclasses import FrozenInstanceError
 
-from boxtrail import LetterboxTransform, letterbox
+from boxtrail import LetterboxTransform, from_geometry, letterbox
 
 
 class LetterboxTests(unittest.TestCase):
@@ -110,6 +111,90 @@ class LetterboxTests(unittest.TestCase):
     def test_invalid_direct_construction(self):
         with self.assertRaises(ValueError):
             LetterboxTransform((10, 10), (20, 20), (10, 10), (0, 0, 0, 0))
+
+    def test_explicit_geometry_matches_letterbox(self):
+        t = from_geometry(
+            source=(1920, 1080),
+            resized=(640, 360),
+            padding=(0, 140, 0, 140),
+        )
+        self.assertEqual(t, letterbox((1920, 1080), (640, 640)))
+        self.assertEqual(t.to_source((128, 208, 400, 352)), (384.0, 204.0, 1200.0, 636.0))
+
+    def test_explicit_geometry_can_have_unequal_scales(self):
+        t = from_geometry(source=(100, 100), resized=(200, 150),
+                          padding=(10, 20, 11, 21))
+        self.assertEqual(t.target_size, (221, 191))
+        self.assertEqual(t.scale, (2.0, 1.5))
+        self.assertEqual(t.to_target((10, 20, 30, 40)), (30.0, 50.0, 70.0, 80.0))
+        self.assertEqual(t.to_source((30, 50, 70, 80)), (10.0, 20.0, 30.0, 40.0))
+
+    def test_explicit_geometry_invalid(self):
+        for kwargs in [
+            {"source": (10, 10), "resized": (0, 10), "padding": (0, 0, 0, 0)},
+            {"source": (10, 10), "resized": (10, 10), "padding": (-1, 0, 0, 0)},
+            {"source": (10, 10), "resized": (10, 10), "padding": (0, 0, 0)},
+            {"source": (10, 10), "resized": (10, 10), "padding": (0, 0, 1.5, 0)},
+        ]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                from_geometry(**kwargs)
+
+    def test_batches_preserve_order_and_allow_empty(self):
+        t = letterbox((1920, 1080), (640, 640))
+        source_boxes = [(384, 204, 1200, 636), (0, 0, 1920, 1080)]
+        target_boxes = t.to_target_many(source_boxes)
+        self.assertEqual(target_boxes, [t.to_target(b) for b in source_boxes])
+        self.assertEqual(t.to_source_many(target_boxes),
+                         [tuple(float(v) for v in b) for b in source_boxes])
+        self.assertEqual(t.to_source_many([]), [])
+        self.assertEqual(t.to_target_many(iter(source_boxes)), target_boxes)
+
+    def test_batch_errors_include_index(self):
+        t = letterbox((10, 10), (20, 20))
+        with self.assertRaisesRegex(ValueError, "index 1"):
+            t.to_source_many([(0, 0, 5, 5), (0, 0, 0, 5)])
+        with self.assertRaisesRegex(ValueError, "iterable"):
+            t.to_source_many(None)
+
+    def test_batch_clipping(self):
+        t = letterbox((10, 10), (20, 20))
+        self.assertEqual(
+            t.to_source_many([(0, 0, 10, 10), (-5, -5, 5, 5)], clip=True),
+            [(0.0, 0.0, 5.0, 5.0), (0.0, 0.0, 2.5, 2.5)],
+        )
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy") is not None,
+                         "NumPy is optional and not installed")
+    def test_numpy_arrays_without_numpy_runtime_dependency(self):
+        import numpy as np
+
+        t = letterbox(np.array([1920, 1080], dtype=np.int64),
+                      np.array([640, 640], dtype=np.int64))
+        b = np.array([128, 208, 400, 352], dtype=np.float32)
+        self.assertEqual(t.to_source(b), (384.0, 204.0, 1200.0, 636.0))
+        boxes = np.array([[128, 208, 400, 352],
+                          [0, 140, 640, 500]], dtype=np.float32)
+        self.assertEqual(t.to_source_many(boxes),
+                         [(384.0, 204.0, 1200.0, 636.0),
+                          (0.0, 0.0, 1920.0, 1080.0)])
+        explicit = from_geometry(source=np.array([1920, 1080]),
+                                 resized=np.array([640, 360]),
+                                 padding=np.array([0, 140, 0, 140]))
+        self.assertEqual(explicit, t)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy") is not None,
+                         "NumPy is optional and not installed")
+    def test_numpy_wrong_shapes_are_rejected(self):
+        import numpy as np
+
+        with self.assertRaises(ValueError):
+            letterbox(np.array([[1920, 1080]]), (640, 640))
+        with self.assertRaises(ValueError):
+            letterbox((1920, 1080), np.array([640.0, 640.0]))
+        with self.assertRaises(ValueError):
+            letterbox((1920, 1080), (640, 640)).to_source(
+                np.array([[0, 0, 10, 10]])
+            )
 
 
 if __name__ == "__main__":

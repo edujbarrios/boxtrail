@@ -1,15 +1,13 @@
 name: Publish to PyPI
 
 on:
-  # The initial release is intentionally restricted to the exact commit message
-  # below; all other pushes skip publishing. Future releases use GitHub Releases.
+  # One-time, commit-message-gated publication of v0.2.0.
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/release.yml"
+    paths: [".github/workflows/release.yml"]
+  # Normal publication method for future versions.
   release:
     types: [published]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,45 +15,55 @@ permissions:
 jobs:
   build:
     name: Test and build
-    # Restrict the initial publication to this one deliberate main push.
     if: >-
-      github.event_name != 'push' ||
-      github.event.head_commit.message == 'release: publish boxtrail 0.1.0'
+      github.event_name == 'release' ||
+      (github.event_name == 'push' &&
+       github.event.head_commit.message == 'release: publish boxtrail 0.2.0')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Install package and build tool
         run: |
           python -m pip install --upgrade pip build
           python -m pip install -e .
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
-      - name: Build wheel and sdist
+      - name: Build distributions
         run: python -m build
-      - name: Upload distributions
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: python-distributions
           path: dist/
           if-no-files-found: error
 
   publish:
-    name: Publish distributions (PyPI trusted publisher)
+    name: Publish to PyPI (trusted publisher)
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: python-distributions
           path: dist/
-      - name: Publish package distributions to PyPI
+      - name: Publish distribution
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create v0.2.0 GitHub Release
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create annotated GitHub release with tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v0.2.0             --repo "${{ github.repository }}"             --target "${{ github.sha }}"             --title "BoxTrail 0.2.0"             --generate-notes
